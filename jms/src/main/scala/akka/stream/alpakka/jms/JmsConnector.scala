@@ -92,7 +92,8 @@ private[jms] trait JmsConnector { this: GraphStageLogic =>
 
 private[jms] class JmsSession(val connection: jms.Connection,
                               val session: jms.Session,
-                              val destination: jms.Destination) {
+                              val jmsDestination: jms.Destination,
+                              val settingsDestination: Destination) {
 
   private[jms] def closeSessionAsync()(implicit ec: ExecutionContext): Future[Unit] = Future { closeSession() }
 
@@ -104,25 +105,35 @@ private[jms] class JmsSession(val connection: jms.Connection,
 
   private[jms] def createProducer()(implicit ec: ExecutionContext): Future[jms.MessageProducer] =
     Future {
-      session.createProducer(destination)
+      session.createProducer(jmsDestination)
     }
 
   private[jms] def createConsumer(
       selector: Option[String]
   )(implicit ec: ExecutionContext): Future[jms.MessageConsumer] =
     Future {
-      selector match {
-        case None => session.createConsumer(destination)
-        case Some(expr) => session.createConsumer(destination, expr)
+      (selector, settingsDestination) match {
+        case (None, t: DurableTopic) =>
+          session.createDurableSubscriber(jmsDestination.asInstanceOf[jms.Topic], t.subscriberName)
+
+        case (Some(expr), t: DurableTopic) =>
+          session.createDurableSubscriber(jmsDestination.asInstanceOf[jms.Topic], t.subscriberName, expr, false)
+
+        case (Some(expr), _) =>
+          session.createConsumer(jmsDestination, expr)
+
+        case (None, _) =>
+          session.createConsumer(jmsDestination)
       }
     }
 }
 
 private[jms] class JmsAckSession(override val connection: jms.Connection,
                                  override val session: jms.Session,
-                                 override val destination: jms.Destination,
+                                 override val jmsDestination: jms.Destination,
+                                 override val settingsDestination: Destination,
                                  val maxPendingAcks: Int)
-    extends JmsSession(connection, session, destination) {
+    extends JmsSession(connection, session, jmsDestination, settingsDestination) {
 
   private[jms] var pendingAck = 0
   private[jms] val ackQueue = new ArrayBlockingQueue[() => Unit](maxPendingAcks + 1)
@@ -141,8 +152,9 @@ private[jms] class JmsAckSession(override val connection: jms.Connection,
 
 private[jms] class JmsTxSession(override val connection: jms.Connection,
                                 override val session: jms.Session,
-                                override val destination: jms.Destination)
-    extends JmsSession(connection, session, destination) {
+                                override val jmsDestination: jms.Destination,
+                                override val settingsDestination: Destination)
+    extends JmsSession(connection, session, jmsDestination, settingsDestination) {
 
   private[jms] val commitQueue = new ArrayBlockingQueue[TxEnvelope => Unit](1)
 
